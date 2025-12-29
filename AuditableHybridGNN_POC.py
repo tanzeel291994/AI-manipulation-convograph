@@ -15,6 +15,7 @@ from torch_geometric.utils import scatter
 import torch.nn.functional as F
 import sys
 from unittest.mock import MagicMock
+from torch_geometric.nn.models import SGFormer
 # 1. Add the QSGNN path to sys.path
 #qsgnn_path = os.path.abspath(os.path.join(os.getcwd(), "../QSGNN/src"))
 #if qsgnn_path not in sys.path:
@@ -42,7 +43,8 @@ class SimpleAzureOpenIE:
         self.deployment_name = deployment_name
 
     def extract_info(self, text: str):
-        """Simple NER and Triple extraction using a single Azure OpenAI call."""
+        """Simple NER and Triple extraction using a single Azure OpenAI call with retry logic."""
+        import time
         sentences = [s.strip() for s in re.split(r'[.!?]', text) if len(s.strip()) > 10]
         
         prompt = f"""
@@ -58,28 +60,42 @@ class SimpleAzureOpenIE:
         }}
         """
         
-        try:
-            response = self.client.chat.completions.create(
-                model=self.deployment_name,
-                messages=[
-                    {"role": "system", "content": "You are a helpful assistant that extracts knowledge graph data in JSON."},
-                    {"role": "user", "content": prompt}
-                ],
-                response_format={"type": "json_object"}
-            )
-            res = json.loads(response.choices[0].message.content)
-            entities = res.get("entities", [])
-            triples = res.get("triples", [])
-        except Exception as e:
-            print(f"Azure OpenAI Error: {e}")
-            entities, triples = [], []
+        max_retries = 3
+        retry_delay = 5 # seconds
+        
+        for attempt in range(max_retries):
+            try:
+                response = self.client.chat.completions.create(
+                    model=self.deployment_name,
+                    messages=[
+                        {"role": "system", "content": "You are a helpful assistant that extracts knowledge graph data in JSON."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    response_format={"type": "json_object"}
+                )
+                content = response.choices[0].message.content
+                if content:
+                    res = json.loads(content)
+                    entities = res.get("entities", [])
+                    triples = res.get("triples", [])
+                    return sentences, entities, triples, [
+                        [ent for ent in entities if ent.lower() in sent.lower()]
+                        for sent in sentences
+                    ]
+                else:
+                    finish_reason = response.choices[0].finish_reason
+                    print(f"Azure OpenAI Warning: Received empty content. Finish reason: {finish_reason}")
+                    if finish_reason == "content_filter":
+                        break # Don't retry for content filter
+            except Exception as e:
+                print(f"Azure OpenAI Error (Attempt {attempt+1}/{max_retries}): {e}")
+                if attempt < max_retries - 1:
+                    print(f"Sleeping for {retry_delay}s before retry...")
+                    time.sleep(retry_delay)
+                else:
+                    print("Max retries reached. Skipping.")
 
-        sentence_entities = []
-        for sent in sentences:
-            found = [ent for ent in entities if ent.lower() in sent.lower()]
-            sentence_entities.append(found)
-
-        return sentences, entities, triples, sentence_entities
+        return sentences, [], [], [[] for _ in sentences]
 
 # --- 2. EMBEDDING MODEL (NV-Embed-v2) ---
 # 2. Fix the Embedding Model class
@@ -106,49 +122,77 @@ class SimpleAzureOpenIE:
 
 class NVEmbedV2EmbeddingModel:
     def __init__(self, model_name: str = "nvidia/NV-Embed-v2"):
-        from sentence_transformers import SentenceTransformer
+        from transformers import AutoModel
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print(f"Loading {model_name} on {self.device}...")
         
         # NV-Embed-v2 requires trust_remote_code=True
-        self.model = SentenceTransformer(
+        # We use AutoModel directly because SentenceTransformer has compatibility issues with its output format
+        self.model = AutoModel.from_pretrained(
             model_name, 
-            device=self.device, 
-            trust_remote_code=True
-        )
-        # NV-Embed-v2 has a max sequence length of 32768
-        self.model.max_seq_length = 32768 
-        self.tokenizer = self.model.tokenizer
+            trust_remote_code=True,
+            torch_dtype=torch.bfloat16
+        ).to(self.device)
+        self.model.eval()
 
-    def batch_encode(self, texts: List[str], instruction: str = "", batch_size: int = 4) -> np.ndarray:
+    # def batch_encode(self, texts: List[str], instruction: str = "passage", batch_size: int = 4) -> np.ndarray:
+    #     if isinstance(texts, str): texts = [texts]
+        
+    #     # NV-Embed-v2 has a native encode method when loaded with trust_remote_code=True
+    #     with torch.no_grad():
+    #         embeddings = self.model.encode(
+    #             texts, 
+    #             instruction=instruction,
+    #             batch_size=batch_size
+    #         )
+        
+    #     if torch.is_tensor(embeddings):
+    #         return embeddings.cpu().numpy()
+    #     return embeddings
+
+    def batch_encode(self, texts: List[str], instruction: str = "passage", batch_size: int = 4) -> np.ndarray:
         if isinstance(texts, str): texts = [texts]
         
-        # NV-Embed-v2 specific formatting:
-        # It usually expects an instruction for queries, followed by a newline.
-        # For passages, the instruction is often empty.
-        processed_texts = []
-        for text in texts:
-            if instruction:
-                processed_texts.append(f"Instruction: {instruction}\nQuery: {text}")
-            else:
-                processed_texts.append(text)
-
-        results = self.model.encode(
-            processed_texts, 
-            batch_size=batch_size,
-            show_progress_bar=False,
-            convert_to_numpy=True,
-            # NV-Embed-v2 specific: don't add EOS token if it's already there
-            normalize_embeddings=True 
-        )
-        return results
+        all_embeddings = []
+        
+        # Use tqdm to show progress and ETA
+        # The 'desc' tells you which part of the graph is being embedded
+        from tqdm import tqdm
+        pbar = tqdm(total=len(texts), desc=f"Embedding {instruction}s", unit="text")
+        
+        for i in range(0, len(texts), batch_size):
+            batch = texts[i : i + batch_size]
+            with torch.no_grad():
+                embeddings = self.model.encode(
+                    batch, 
+                    instruction=instruction,
+                    batch_size=batch_size
+                )
+                
+                if torch.is_tensor(embeddings):
+                    embeddings = embeddings.cpu().numpy()
+                all_embeddings.append(embeddings)
+            
+            pbar.update(len(batch))
+            
+        pbar.close()
+        return np.vstack(all_embeddings)
 
 # --- 2. AUDITABLE HYBRID GNN MODEL ---
 class AuditableHybridGNN(nn.Module):
     def __init__(self, metadata, hidden_dim):
         super().__init__()
         self.local_hgt = HGTConv(hidden_dim, hidden_dim, metadata, heads=4)
-        self.entity_global_attn = nn.MultiheadAttention(hidden_dim, num_heads=4, batch_first=True)
+        #self.entity_global_attn = nn.MultiheadAttention(hidden_dim, num_heads=4, batch_first=True)
+        self.entity_global_reasoner = SGFormer(
+            in_channels=hidden_dim,
+            hidden_channels=hidden_dim,
+            out_channels=hidden_dim,
+            trans_num_layers=1,    # Number of global attention layers
+            trans_num_heads=4,     # Number of attention heads
+            gnn_num_layers=0,      # We use HGT for local, so disable SGFormer's internal GNN
+            graph_weight=0.0       # Only use the global transformer output
+        )
         self.entity_norm = nn.LayerNorm(hidden_dim)
         self.passage_norm = nn.LayerNorm(hidden_dim)
         self.alpha = 0.1
@@ -167,8 +211,14 @@ class AuditableHybridGNN(nn.Module):
         
         # 2. Global Entity Reasoning (Self-Attention among entities)
         h_local_ent = h_dict['entity']
-        entities_batch = h_local_ent.unsqueeze(0) # [1, N, D]
-        h_ent_global, _ = self.entity_global_attn(entities_batch, entities_batch, entities_batch)
+        #entities_batch = h_local_ent.unsqueeze(0) # [1, N, D]
+        #h_ent_global, _ = self.entity_global_attn(entities_batch, entities_batch, entities_batch)
+        # Create an empty edge index for SGFormer's requirement
+        empty_edge_index = torch.empty((2, 0), dtype=torch.long, device=h_local_ent.device)
+        # SGFormer performs linear attention, avoiding the N^2 memory bottleneck
+        h_ent_global = self.entity_global_reasoner(h_local_ent, empty_edge_index)
+        
+        # Residual connection and normalization
         h_dict['entity'] = self.entity_norm((1 - self.alpha) * h_local_ent + self.alpha * h_ent_global.squeeze(0))
         
         # 3. Query-Guided Broadcast (Update Passages based on Query-Relevant Entities)
@@ -258,29 +308,43 @@ class POCGraphBuilder:
         all_sentences_info = [] # Stores global sentence text and doc mapping
         all_doc_triples = []
         
-        # 1. IDENTIFY MISSING CHUNKS (Like QSGNNRAG line 1365-1367)
+        # 1. IDENTIFY MISSING CHUNKS (Optimized for unique hashes)
         doc_hashes = [md5(d.encode()).hexdigest() for d in docs]
-        missing_indices = [i for i, h in enumerate(doc_hashes) if h not in self.cache]
-        # 2. BATCH PROCESS MISSING CHUNKS (Like QSGNNRAG line 1371)
-        if missing_indices:
-            print(f"Processing {len(missing_indices)} new chunks through OpenIE...")
-            for idx in missing_indices:
+        
+        unique_missing = {}
+        for idx, h in enumerate(doc_hashes):
+            if h not in self.cache and h not in unique_missing:
+                unique_missing[h] = idx
+        
+        unique_missing={} # debug setting to empty array for now.
+        # 2. BATCH PROCESS MISSING CHUNKS
+        if unique_missing:
+            print(f"Processing {len(unique_missing)} unique new chunks through OpenIE...")
+            for h, idx in tqdm(unique_missing.items(), desc="Extracting Knowledge"):
                 res = self.ie_tool.extract_info(docs[idx])
-                # Store the result in cache indexed by hash
-                self.cache[doc_hashes[idx]] = {
-                    "passage": docs[idx],
-                    "sentences": res[0],
-                    "entities": res[1],
-                    "triples": res[2],
-                    "sentence_entities": res[3]
-                }
-            # Save updated cache (Like QSGNNRAG line 1375)
-            with open(self.cache_path, 'w') as f:
-                json.dump(self.cache, f, indent=2)
+                
+                # CHECK: Only cache if we actually got entities or triples back
+                if res[1] or res[2]: 
+                    self.cache[h] = {
+                        "passage": docs[idx],
+                        "sentences": res[0],
+                        "entities": res[1],
+                        "triples": res[2],
+                        "sentence_entities": res[3]
+                    }
+                else:
+                    print(f"Skipping cache for hash {h} due to empty extraction (will retry next run).")
+                
+                if len(self.cache) % 100 == 0:
+                    self._save_cache()
+
+            self._save_cache()
 
         print("Extracting OpenIE info...",len(docs))
         # 3. CONSTRUCT LOCAL GRAPH DATA FROM CACHE
         for i, doc_hash in enumerate(doc_hashes):
+            if doc_hash not in self.cache:
+                continue
             cached_res = self.cache[doc_hash]
             
             sents = cached_res["sentences"]
@@ -301,10 +365,19 @@ class POCGraphBuilder:
         print("after triples: ", len(all_doc_triples))
         # 1. Resolve Unique Entities
         all_entities_set = set()
-        for sub, rel, obj in all_doc_triples:
-            all_entities_set.update([sub, obj])
+        for t in all_doc_triples:
+            # Ensure sub and obj are strings (LLMs sometimes return lists or None)
+            sub = t[0] if isinstance(t[0], str) else str(t[0])
+            obj = t[2] if isinstance(t[2], str) else str(t[2])
+            all_entities_set.add(sub)
+            all_entities_set.add(obj)
+            
         for s_info in all_sentences_info:
-            all_entities_set.update(s_info['entities'])
+            for ent in s_info['entities']:
+                if isinstance(ent, str):
+                    all_entities_set.add(ent)
+                else:
+                    all_entities_set.add(str(ent))
             
         unique_entities = sorted(list(all_entities_set))
         ent_to_idx = {ent: i for i, ent in enumerate(unique_entities)}
@@ -326,7 +399,12 @@ class POCGraphBuilder:
         
         # A. Entity -> Entity (from Triples + Inverses)
         e2e_edges, e2e_relation_texts = [], []
-        for sub, rel, obj in all_doc_triples:
+        for t in all_doc_triples:
+            # Re-sanitize to match keys in ent_to_idx
+            sub = t[0] if isinstance(t[0], str) else str(t[0])
+            rel = t[1] if isinstance(t[1], str) else str(t[1])
+            obj = t[2] if isinstance(t[2], str) else str(t[2])
+            
             s_idx, o_idx = ent_to_idx[sub], ent_to_idx[obj]
             # Forward
             e2e_edges.append([s_idx, o_idx])
@@ -445,8 +523,8 @@ def evaluate_retrieval(model, builder, samples, embed_model, k_list=[1, 5]):
 if __name__ == "__main__":
     # 1. Configuration
     azure_config = {
-        "api_key": "db8dac9cea3148d48c348ed46e9bfb2d",
-        "endpoint": "https://bodeu-des-csv02.openai.azure.com/",
+        "api_key": "",
+        "endpoint": "",
         "api_version": "2024-12-01-preview", 
         "deployment_name": "gpt-4o-mini" 
     }

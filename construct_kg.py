@@ -36,7 +36,13 @@ class GlobalKGManager:
 # --- Execution Script ---
 if __name__ == "__main__":
     # 1. Config
-    azure_config = { ... } # Your Azure keys
+    azure_config = {
+        "api_key": "db8dac9cea3148d48c348ed46e9bfb2d",
+        "endpoint": "https://bodeu-des-csv02.openai.azure.com/",
+        "api_version": "2024-12-01-preview", 
+        "deployment_name": "gpt-4o-mini" 
+    }    
+    
     corpus_path = "dataset/musique_corpus.json"
     
     # 2. Init Tools
@@ -50,7 +56,7 @@ if __name__ == "__main__":
         corpus = json.load(f)
     
     # Format docs as "Title\nText"
-    all_docs = [f"{d['title']}\n{d['text']}" for d in corpus]
+    all_docs = [f"{d['text']}" for d in corpus]
     
     print(f"Building Global KG for {len(all_docs)} documents...")
     

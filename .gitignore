@@ -1,2 +1,11 @@
 .env
 GNN-HGT.code-workspace
+kg_storage/
+musique_ie_cache.json
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.coverage
+htmlcov/
