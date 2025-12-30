@@ -181,20 +181,32 @@ class NVEmbedV2EmbeddingModel:
 class AuditableHybridGNN(nn.Module):
     def __init__(self, metadata, hidden_dim):
         super().__init__()
+        self.hidden_dim = hidden_dim
+        
+        # 1. Local Structural Reasoning (HGT)
         self.local_hgt = HGTConv(hidden_dim, hidden_dim, metadata, heads=4)
-        #self.entity_global_attn = nn.MultiheadAttention(hidden_dim, num_heads=4, batch_first=True)
+        
+        # 2. Global Entity Reasoning (SGFormer Transformer)
         self.entity_global_reasoner = SGFormer(
             in_channels=hidden_dim,
             hidden_channels=hidden_dim,
             out_channels=hidden_dim,
-            trans_num_layers=1,    # Number of global attention layers
-            trans_num_heads=4,     # Number of attention heads
-            gnn_num_layers=0,      # We use HGT for local, so disable SGFormer's internal GNN
-            graph_weight=0.0       # Only use the global transformer output
+            trans_num_layers=1,    
+            trans_num_heads=4,     
+            gnn_num_layers=0,      
+            graph_weight=0.0       
         )
+        
+        # Normalization and Alpha Blend
         self.entity_norm = nn.LayerNorm(hidden_dim)
         self.passage_norm = nn.LayerNorm(hidden_dim)
         self.alpha = 0.1
+        
+        # --- 3. TASK-SPECIFIC LAYERS (The ones we fine-tune) ---
+        # Query Aligner: Projects query into the pre-trained entity semantic space
+        self.query_aligner = nn.Linear(hidden_dim, hidden_dim)
+        
+        # Final Scoring Head: Document relevance prediction
         self.scoring_head = nn.Sequential(
             nn.Linear(hidden_dim * 2, hidden_dim),
             nn.ReLU(),
@@ -205,42 +217,49 @@ class AuditableHybridGNN(nn.Module):
         if query_emb.dim() == 1:
             query_emb = query_emb.unsqueeze(0)
             
-        # 1. Local Structural Reasoning (HGT)
+        # 1. BACKBONE: Local Structural Reasoning (HGT)
         h_dict = self.local_hgt(x_dict, edge_index_dict)
+        h_dict = {k: F.gelu(v) for k, v in h_dict.items()}
         
-        # 2. Global Entity Reasoning (Self-Attention among entities)
+        # 2. BACKBONE: Global Entity Reasoning
         h_local_ent = h_dict['entity']
-        # Create the missing batch vector for SGFormer (all nodes in one graph instance)
         batch_ent = h_local_ent.new_zeros(h_local_ent.size(0), dtype=torch.long)
-        
-        # Call .trans_conv directly to get RAW features (no log_softmax)
-        # This mirrors the logic in the pre-training script for high-quality features
         h_ent_global = self.entity_global_reasoner.trans_conv(h_local_ent, batch_ent)
         
         # Residual connection and normalization
         h_dict['entity'] = self.entity_norm((1 - self.alpha) * h_local_ent + self.alpha * h_ent_global)
         
-        # 3. Query-Guided Broadcast (Update Passages based on Query-Relevant Entities)
-        e2p_index = edge_index_dict[('entity', 'in', 'passage')]
-        ent_idx, psg_idx = e2p_index
+        # --- 3. FINE-TUNED LOGIC: Query-Guided Broadcast ---
+        #e2p_index = edge_index_dict[('entity', 'in', 'passage')]
+        #ent_idx, psg_idx = e2p_index
 
-        # Calculate relevance of each entity to the query
-        q_expanded = query_emb.expand(h_dict['entity'].size(0), -1)
+        # Step A: Align query
+        q_aligned = self.query_aligner(query_emb)
+        q_expanded = q_aligned.expand(h_dict['entity'].size(0), -1)
         relevance = torch.sum(h_dict['entity'] * q_expanded, dim=-1).sigmoid()
 
-        # Weight entity features by relevance
-        weighted_ent_features = h_dict['entity'][ent_idx] * relevance[ent_idx].unsqueeze(-1)
+        # Step B: Entity -> Sentence (Local Context)
+        e2s_index = edge_index_dict[('entity', 'in', 'sentence')]
+        ent_idx, sent_idx = e2s_index
+        weighted_ent = h_dict['entity'][ent_idx] * relevance[ent_idx].unsqueeze(-1)
+        
+        sent_context = scatter(src=weighted_ent, index=sent_idx, dim=0, 
+                               dim_size=h_dict['sentence'].size(0), reduce='sum')
+        
+        # Update Sentences
+        h_dict['sentence'] = F.gelu(h_dict['sentence'] + sent_context)
 
-        # Aggregate weighted features into passages
-        psg_context = scatter(src=weighted_ent_features, 
-                            index=psg_idx, 
-                            dim=0, 
-                            dim_size=h_dict['passage'].size(0), 
-                            reduce='sum')
+        # Step C: Sentence -> Passage (Document Context)
+        s2p_index = edge_index_dict[('sentence', 'in', 'passage')]
+        s_idx, p_idx = s2p_index
+        
+        psg_context = scatter(src=h_dict['sentence'][s_idx], index=p_idx, dim=0, 
+                              dim_size=h_dict['passage'].size(0), reduce='sum')
 
         h_dict['passage'] = self.passage_norm(h_dict['passage'] + psg_context)
 
-        # 4. Final Scoring: Passage Embedding + Query Embedding
+
+        # 4. FINE-TUNED LOGIC: Final Scoring
         passages = h_dict['passage']
         q_scoring = query_emb.expand(passages.size(0), -1)
         
