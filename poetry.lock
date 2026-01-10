@@ -3541,37 +3541,6 @@ rag = ["accelerate", "datasets", "pandas", "pcst_fast", "sentencepiece", "torchm
 test = ["onnx", "onnxruntime", "onnxscript", "pytest", "pytest-cov"]
 
 [[package]]
-name = "torch-scatter"
-version = "2.1.2"
-description = "PyTorch Extension Library of Optimized Scatter Operations"
-optional = false
-python-versions = ">=3.8"
-groups = ["main"]
-files = [
-    {file = "torch_scatter-2.1.2.tar.gz", hash = "sha256:69b3aa435f2424ac6a1bfb6ff702da6eb73b33ca0db38fb26989c74159258e47"},
-]
-
-[package.extras]
-test = ["pytest", "pytest-cov"]
-
-[[package]]
-name = "torch-sparse"
-version = "0.6.18"
-description = "PyTorch Extension Library of Optimized Autograd Sparse Matrix Operations"
-optional = false
-python-versions = ">=3.8"
-groups = ["main"]
-files = [
-    {file = "torch_sparse-0.6.18.tar.gz", hash = "sha256:2f14c510a6e93f404c6ea357210615b3c15a71731f9dbd86f25434e34fb5a741"},
-]
-
-[package.dependencies]
-scipy = "*"
-
-[package.extras]
-test = ["pytest", "pytest-cov"]
-
-[[package]]
 name = "tornado"
 version = "6.5.4"
 description = "Tornado is a Python web framework and asynchronous networking library, originally developed at FriendFeed."
@@ -4091,4 +4060,4 @@ propcache = ">=0.2.1"
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.12,<3.14"
-content-hash = "a8c92ec70dd8ebab1ed24404f400c79ea1cd08db8554ecfb1a27d885cdfa2fba"
+content-hash = "21b909d142c4f80e0bc8b78fc5b7c916d8c28f22641702d869a6459912a80350"
