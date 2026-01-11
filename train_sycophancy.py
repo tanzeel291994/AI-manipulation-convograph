@@ -29,6 +29,7 @@ from construct_conversation_kg import ConversationGraphBuilder, SimpleEmbeddingM
 from SycophancyDetector import SycophancyDetector, SycophancyDetectorLite, create_model
 from data_loader import (
     AnthropicSycophancyLoader,
+    SimpleSycophancyLoader,
     SyntheticSycophancyGenerator,
     SycophancyDataset,
     create_data_loaders
@@ -350,6 +351,35 @@ def train_convograph(args):
     elif args.data_source == 'synthetic':
         generator = SyntheticSycophancyGenerator(seed=args.seed)
         conversations, labels = generator.generate_dataset(n_samples=args.synthetic_samples)
+    elif args.data_source == 'simple_sycophancy':
+        loader = SimpleSycophancyLoader()
+        
+        # Load Google Math Sycophancy
+        #print("Loading Simple Sycophancy (Math)...")
+        #math_convs, math_labels = loader.load_google_sycophancy()
+        medical_convs, medical_labels = loader.load_medical_sycophancy()
+        medquad_multi_convs, medquad_multi_labels = loader.load_medquad_pressure_test()
+        # Load TruthfulQA
+        print("Loading TruthfulQA...")
+        tqa_convs, tqa_labels = loader.load_truthful_qa()
+        
+        # Combine
+        conversations = medical_convs + medquad_multi_convs + tqa_convs
+        labels = medical_labels + medquad_multi_labels + tqa_labels
+        
+        # Manual Shuffle & Split
+        import numpy as np
+        indices = np.random.permutation(len(conversations))
+        
+        # Split 80/20
+        n_val = int(len(conversations) * args.val_split)
+        val_indices = indices[:n_val]
+        train_indices = indices[n_val:]
+        
+        train_graphs = graph_builder.build_batch_graphs([conversations[i] for i in train_indices], 
+                                                        [labels[i] for i in train_indices])
+        val_graphs = graph_builder.build_batch_graphs([conversations[i] for i in val_indices], 
+                                                      [labels[i] for i in val_indices])
     else:
         # Load from custom path
         with open(args.data_source, 'r') as f:
@@ -439,8 +469,8 @@ def main():
     parser = argparse.ArgumentParser(description="Train ConvoGraph Sycophancy Detector")
 
     # Data arguments
-    parser.add_argument('--data-source', type=str, default='synthetic',
-                        choices=['anthropic', 'synthetic'],
+    parser.add_argument('--data-source', type=str, default='simple_sycophancy',
+                        choices=['anthropic', 'synthetic', 'simple_sycophancy'],
                         help='Data source for training')
     parser.add_argument('--data-dir', type=str, default='data',
                         help='Directory for cached data')

@@ -1,32 +1,55 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg
+*.egg-info/
+.eggs/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
 .env
-GNN-HGT.code-workspace
-kg_storage/
-musique_ie_cache.json
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-.pytest_cache/
-.coverage
-htmlcov/
-models/
-new_datasets/
-processed_train_data/
-processed_noisy_train/
-graph_storage/
-kg_storage/
-musique_ie_cache.json
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-.pytest_cache/
-.coverage
-htmlcov/
+.venv
+env/
+venv/
+
+# IDE
+.vscode/
+.idea/
+*.code-workspace
 .DS_Store
 
-# Model checkpoints (too large for GitHub)
-*.pth
+# Model checkpoints (large files)
 checkpoints/
 checkpoints_*/
+*.pth
 pretrained_gnn_*
+
+# Data caches (large files)
+data/
+dataset/
+kg_storage/
+graph_storage/
+musique_ie_cache.json
+*.json.cache
+
+# Processed data
+processed_*/
+new_datasets/
+models/
+
+# Logs
+*.log
+logs/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Build
+build/
+dist/

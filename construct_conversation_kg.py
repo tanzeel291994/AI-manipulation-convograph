@@ -293,12 +293,15 @@ class ConversationGraphBuilder:
 
                     responds_to_edges.append([idx, user_idx])
 
-                    # Alignment detection
-                    alignment = self.detect_alignment(user_text, text)
-                    if alignment == self.ALIGNMENT_AGREES:
-                        agrees_edges.append([idx, user_idx])
-                    elif alignment == self.ALIGNMENT_CONTRADICTS:
-                        contradicts_edges.append([idx, user_idx])
+                    # NOTE: We intentionally do NOT use rule-based alignment detection here
+                    # because it causes LABEL LEAKAGE - the patterns we use to detect
+                    # agreement ("you're right", "i agree") are the same patterns that
+                    # define sycophantic responses in the dataset!
+                    #
+                    # Instead, let the GNN learn alignment patterns from embeddings.
+                    # The agrees_with/contradicts edges are left empty - the model must
+                    # learn from the actual text representations.
+                    pass
 
         # Set edge indices - ALWAYS create all edge types for consistent metadata
         # This is critical for HGT which expects consistent edge types across batches
