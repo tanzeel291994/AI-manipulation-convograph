@@ -222,9 +222,19 @@ class ConversationGraphBuilder:
         sentiment_embeddings = self.embed_model.batch_encode(sentiment_texts, instruction="passage")
 
         # Set node features
+        hidden_dim = user_embeddings.shape[1]
         data['user_turn'].x = torch.from_numpy(user_embeddings).float()
         data['ai_turn'].x = torch.from_numpy(ai_embeddings).float()
-        data['topic'].x = torch.from_numpy(topic_embeddings).float() if len(unique_topics) > 0 else torch.zeros(0, user_embeddings.shape[1])
+
+        # Always create at least 1 topic node for consistent metadata
+        if len(unique_topics) > 0:
+            data['topic'].x = torch.from_numpy(topic_embeddings).float()
+        else:
+            # Create a dummy topic node
+            unique_topics = ["[NO_TOPIC]"]
+            topic_to_idx = {"[NO_TOPIC]": 0}
+            data['topic'].x = torch.zeros(1, hidden_dim)
+
         data['sentiment'].x = torch.from_numpy(sentiment_embeddings).float()
 
         # Build edges
@@ -290,37 +300,43 @@ class ConversationGraphBuilder:
                     elif alignment == self.ALIGNMENT_CONTRADICTS:
                         contradicts_edges.append([idx, user_idx])
 
-        # Set edge indices
-        if responds_to_edges:
-            data['ai_turn', 'responds_to', 'user_turn'].edge_index = torch.tensor(responds_to_edges).t().contiguous()
-            # Reverse edge
-            data['user_turn', 'receives', 'ai_turn'].edge_index = torch.tensor([[e[1], e[0]] for e in responds_to_edges]).t().contiguous()
+        # Set edge indices - ALWAYS create all edge types for consistent metadata
+        # This is critical for HGT which expects consistent edge types across batches
 
-        if follows_edges_user:
-            data['user_turn', 'follows', 'user_turn'].edge_index = torch.tensor(follows_edges_user).t().contiguous()
+        # Helper to create edge tensor (empty if no edges)
+        def make_edge_index(edges):
+            if edges:
+                return torch.tensor(edges).t().contiguous()
+            else:
+                return torch.zeros((2, 0), dtype=torch.long)
 
-        if follows_edges_ai:
-            data['ai_turn', 'follows', 'ai_turn'].edge_index = torch.tensor(follows_edges_ai).t().contiguous()
+        # Response edges (always present for valid conversations)
+        data['ai_turn', 'responds_to', 'user_turn'].edge_index = make_edge_index(responds_to_edges)
+        data['user_turn', 'receives', 'ai_turn'].edge_index = make_edge_index(
+            [[e[1], e[0]] for e in responds_to_edges] if responds_to_edges else []
+        )
 
-        if discusses_user and unique_topics:
-            data['user_turn', 'discusses', 'topic'].edge_index = torch.tensor(discusses_user).t().contiguous()
-            data['topic', 'discussed_by', 'user_turn'].edge_index = torch.tensor([[e[1], e[0]] for e in discusses_user]).t().contiguous()
+        # Sequential edges
+        data['user_turn', 'follows', 'user_turn'].edge_index = make_edge_index(follows_edges_user)
+        data['ai_turn', 'follows', 'ai_turn'].edge_index = make_edge_index(follows_edges_ai)
 
-        if discusses_ai and unique_topics:
-            data['ai_turn', 'discusses', 'topic'].edge_index = torch.tensor(discusses_ai).t().contiguous()
-            data['topic', 'discussed_by', 'ai_turn'].edge_index = torch.tensor([[e[1], e[0]] for e in discusses_ai]).t().contiguous()
+        # Topic edges (always create - we now always have at least 1 topic node)
+        data['user_turn', 'discusses', 'topic'].edge_index = make_edge_index(discusses_user)
+        data['topic', 'discussed_by', 'user_turn'].edge_index = make_edge_index(
+            [[e[1], e[0]] for e in discusses_user] if discusses_user else []
+        )
+        data['ai_turn', 'discusses', 'topic'].edge_index = make_edge_index(discusses_ai)
+        data['topic', 'discussed_by', 'ai_turn'].edge_index = make_edge_index(
+            [[e[1], e[0]] for e in discusses_ai] if discusses_ai else []
+        )
 
-        if expresses_user:
-            data['user_turn', 'expresses', 'sentiment'].edge_index = torch.tensor(expresses_user).t().contiguous()
+        # Sentiment edges
+        data['user_turn', 'expresses', 'sentiment'].edge_index = make_edge_index(expresses_user)
+        data['ai_turn', 'expresses', 'sentiment'].edge_index = make_edge_index(expresses_ai)
 
-        if expresses_ai:
-            data['ai_turn', 'expresses', 'sentiment'].edge_index = torch.tensor(expresses_ai).t().contiguous()
-
-        if agrees_edges:
-            data['ai_turn', 'agrees_with', 'user_turn'].edge_index = torch.tensor(agrees_edges).t().contiguous()
-
-        if contradicts_edges:
-            data['ai_turn', 'contradicts', 'user_turn'].edge_index = torch.tensor(contradicts_edges).t().contiguous()
+        # Agreement/Contradiction edges - ALWAYS create even if empty
+        data['ai_turn', 'agrees_with', 'user_turn'].edge_index = make_edge_index(agrees_edges)
+        data['ai_turn', 'contradicts', 'user_turn'].edge_index = make_edge_index(contradicts_edges)
 
         # Store label if provided
         if label is not None:

@@ -91,15 +91,23 @@ class SycophancyTrainer:
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1} [Train]")
 
         for batch in pbar:
-            # Handle different batch formats
-            if isinstance(batch, tuple):
-                graphs, labels = batch
-                if not isinstance(graphs, list):
-                    graphs = [graphs]
-                    labels = labels.unsqueeze(0)
-            else:
+            # Handle different batch formats from PyG DataLoader
+            if isinstance(batch, (list, tuple)) and len(batch) == 2:
+                graph_or_graphs, label_or_labels = batch
+                # Single graph case
+                if isinstance(graph_or_graphs, HeteroData):
+                    graphs = [graph_or_graphs]
+                    labels = [label_or_labels] if isinstance(label_or_labels, (int, float)) else label_or_labels
+                else:
+                    graphs = graph_or_graphs if isinstance(graph_or_graphs, list) else [graph_or_graphs]
+                    labels = label_or_labels if isinstance(label_or_labels, (list, torch.Tensor)) else [label_or_labels]
+            elif isinstance(batch, HeteroData):
                 graphs = [batch]
-                labels = batch.y
+                labels = [batch.y.item() if batch.y.dim() > 0 else batch.y]
+            else:
+                # Batch is a list of graphs
+                graphs = batch if isinstance(batch, list) else [batch]
+                labels = [g.y.item() if hasattr(g, 'y') else 0 for g in graphs]
 
             batch_loss = 0.0
 
@@ -150,14 +158,21 @@ class SycophancyTrainer:
 
         with torch.no_grad():
             for batch in tqdm(val_loader, desc="Validating"):
-                if isinstance(batch, tuple):
-                    graphs, labels = batch
-                    if not isinstance(graphs, list):
-                        graphs = [graphs]
-                        labels = labels.unsqueeze(0)
-                else:
+                # Handle different batch formats from PyG DataLoader
+                if isinstance(batch, (list, tuple)) and len(batch) == 2:
+                    graph_or_graphs, label_or_labels = batch
+                    if isinstance(graph_or_graphs, HeteroData):
+                        graphs = [graph_or_graphs]
+                        labels = [label_or_labels] if isinstance(label_or_labels, (int, float)) else label_or_labels
+                    else:
+                        graphs = graph_or_graphs if isinstance(graph_or_graphs, list) else [graph_or_graphs]
+                        labels = label_or_labels if isinstance(label_or_labels, (list, torch.Tensor)) else [label_or_labels]
+                elif isinstance(batch, HeteroData):
                     graphs = [batch]
-                    labels = batch.y
+                    labels = [batch.y.item() if batch.y.dim() > 0 else batch.y]
+                else:
+                    graphs = batch if isinstance(batch, list) else [batch]
+                    labels = [g.y.item() if hasattr(g, 'y') else 0 for g in graphs]
 
                 for graph, label in zip(graphs, labels):
                     graph = graph.to(self.device)

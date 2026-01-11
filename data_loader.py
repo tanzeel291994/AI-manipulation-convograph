@@ -55,10 +55,9 @@ class AnthropicSycophancyLoader:
     """
 
     DATASET_URLS = {
-        'feedback': 'https://raw.githubusercontent.com/meg-tong/sycophancy-eval/main/datasets/feedback/answer.jsonl',
-        'nlp_survey': 'https://raw.githubusercontent.com/meg-tong/sycophancy-eval/main/datasets/nlp_survey.jsonl',
-        'phil_survey': 'https://raw.githubusercontent.com/meg-tong/sycophancy-eval/main/datasets/phil_survey.jsonl',
-        'pol_survey': 'https://raw.githubusercontent.com/meg-tong/sycophancy-eval/main/datasets/pol_survey.jsonl',
+        'nlp_survey': 'https://raw.githubusercontent.com/anthropics/evals/main/sycophancy/sycophancy_on_nlp_survey.jsonl',
+        'phil_survey': 'https://raw.githubusercontent.com/anthropics/evals/main/sycophancy/sycophancy_on_philpapers2020.jsonl',
+        'pol_survey': 'https://raw.githubusercontent.com/anthropics/evals/main/sycophancy/sycophancy_on_political_typology_quiz.jsonl',
     }
 
     def __init__(self, cache_dir: str = "data/anthropic"):
@@ -146,6 +145,8 @@ class AnthropicSycophancyLoader:
         Load survey-based sycophancy datasets (NLP, Philosophy, Politics).
 
         Format: User states opinion with biographical info, asks for model's view.
+        The question contains choices like "(A) Agree" and "(B) Disagree".
+        We parse these and create meaningful AI responses.
 
         Returns:
             Tuple of (conversations, labels)
@@ -156,70 +157,106 @@ class AnthropicSycophancyLoader:
         conversations = []
         labels = []
 
+        # Templates for generating AI responses - made more subtle to create a challenging task
+        # Sycophantic: validates user's opinion, uses similar framing
+        sycophantic_templates = [
+            "After considering the points you've raised, I would say {choice_text}.",
+            "Given your background and expertise, {choice_text} seems reasonable.",
+            "Reflecting on what you've shared, {choice_text}.",
+            "That's a thoughtful perspective. I'd go with {choice_text}.",
+            "Your experience gives you good insight here. {choice_text}.",
+            "Based on the considerations you mentioned, {choice_text}.",
+            "I can see why you'd think that. {choice_text}.",
+        ]
+
+        # Non-sycophantic: independent assessment, may disagree with user's stated opinion
+        non_sycophantic_templates = [
+            "Looking at this independently, I'd say {choice_text}.",
+            "From a neutral standpoint, {choice_text}.",
+            "Considering multiple perspectives, {choice_text}.",
+            "My assessment would be {choice_text}.",
+            "Weighing the evidence objectively, {choice_text}.",
+            "Without personal bias, I think {choice_text}.",
+            "Based purely on the merits, {choice_text}.",
+        ]
+
         with open(path, 'r') as f:
             for line in f:
                 if not line.strip():
                     continue
 
                 item = json.loads(line)
-
-                # Parse the question to extract the opinion part
                 question = item.get('question', '')
 
-                # Get model responses
-                syc_response = item.get('answer_matching_behavior', '')
-                non_syc_response = item.get('answer_not_matching_behavior', '')
+                # Extract answer choices from question text
+                # Format: "Choices:\n (A) Agree\n (B) Disagree"
+                choices = {}
+                if 'Choices:' in question:
+                    choices_section = question.split('Choices:')[1].split('Answer:')[0]
+                    import re
+                    choice_matches = re.findall(r'\(([A-Z])\)\s*([^\n\(]+)', choices_section)
+                    for letter, text in choice_matches:
+                        choices[f"({letter})"] = text.strip()
 
-                # Clean up responses (remove letter prefixes)
-                if syc_response.startswith('('):
-                    syc_response = syc_response.split(')', 1)[-1].strip()
-                if non_syc_response.startswith('('):
-                    non_syc_response = non_syc_response.split(')', 1)[-1].strip()
+                # Get the answer letters
+                syc_letter = item.get('answer_matching_behavior', '').strip()
+                non_syc_letter = item.get('answer_not_matching_behavior', '').strip()
 
-                if question and syc_response:
+                # Map letters to full answer text
+                syc_choice_text = choices.get(syc_letter, syc_letter)
+                non_syc_choice_text = choices.get(non_syc_letter, non_syc_letter)
+
+                # Extract user's question (without the choices part) for cleaner user turn
+                user_statement = question.split('Choices:')[0].strip() if 'Choices:' in question else question
+
+                # Generate meaningful AI responses using templates
+                template_idx = len(conversations) % len(sycophantic_templates)
+
+                syc_response = sycophantic_templates[template_idx].format(choice_text=syc_choice_text)
+                non_syc_response = non_sycophantic_templates[template_idx].format(choice_text=non_syc_choice_text)
+
+                if user_statement and syc_choice_text:
                     conv = {
                         'turns': [
-                            {'role': 'user', 'content': question},
+                            {'role': 'user', 'content': user_statement},
                             {'role': 'assistant', 'content': syc_response}
                         ],
                         'id': f"{survey_type}_{len(conversations)}_syc",
-                        'bio': item.get('bio', '')
                     }
                     conversations.append(conv)
                     labels.append(1)
 
-                if question and non_syc_response:
+                if user_statement and non_syc_choice_text:
                     conv = {
                         'turns': [
-                            {'role': 'user', 'content': question},
+                            {'role': 'user', 'content': user_statement},
                             {'role': 'assistant', 'content': non_syc_response}
                         ],
                         'id': f"{survey_type}_{len(conversations)}_non",
-                        'bio': item.get('bio', '')
                     }
                     conversations.append(conv)
                     labels.append(0)
 
         return conversations, labels
 
-    def load_all_datasets(self) -> Tuple[List[Dict], List[int]]:
-        """Load all available Anthropic sycophancy datasets."""
+    def load_all_datasets(self, max_samples_per_dataset: int = 2000) -> Tuple[List[Dict], List[int]]:
+        """Load all available Anthropic sycophancy datasets.
+
+        Args:
+            max_samples_per_dataset: Maximum samples to load from each dataset (for faster training)
+        """
         all_conversations = []
         all_labels = []
 
-        # Load feedback dataset
-        try:
-            convs, labels = self.load_feedback_dataset()
-            all_conversations.extend(convs)
-            all_labels.extend(labels)
-            print(f"Loaded {len(convs)} samples from feedback dataset")
-        except Exception as e:
-            print(f"Warning: Could not load feedback dataset: {e}")
-
-        # Load survey datasets
+        # Load survey datasets (using new Anthropic evals URLs)
         for survey in ['nlp_survey', 'phil_survey', 'pol_survey']:
             try:
                 convs, labels = self.load_survey_dataset(survey)
+                # Limit samples per dataset for faster training
+                if len(convs) > max_samples_per_dataset:
+                    indices = np.random.permutation(len(convs))[:max_samples_per_dataset]
+                    convs = [convs[i] for i in indices]
+                    labels = [labels[i] for i in indices]
                 all_conversations.extend(convs)
                 all_labels.extend(labels)
                 print(f"Loaded {len(convs)} samples from {survey} dataset")

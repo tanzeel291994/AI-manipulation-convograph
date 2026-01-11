@@ -24,3 +24,9 @@ __pycache__/
 .coverage
 htmlcov/
 .DS_Store
+
+# Model checkpoints (too large for GitHub)
+*.pth
+checkpoints/
+checkpoints_*/
+pretrained_gnn_*
